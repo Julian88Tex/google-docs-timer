@@ -4,6 +4,10 @@ class DocsTimerManager {
     this.timers = new Map();
     this.timerCounter = 0;
     this.isGoogleDocs = false;
+    this.minimized = false; // Track minimized state
+    this.draggedTimerId = null; // For drag-and-drop
+    this.timerOrder = JSON.parse(localStorage.getItem('docsTimerOrder') || '[]');
+    this.timersToShowCount = 5; // Start with 5 timers
     this.init();
   }
 
@@ -30,6 +34,18 @@ class DocsTimerManager {
         console.log('Received "addTimer" message from background script.');
         this.addTimerAtCursor();
         sendResponse({status: "Timer added successfully."});
+      } else if (request.action === 'showPanel') {
+        localStorage.setItem('docsTimersPanelClosed', 'false');
+        this.createTimersPanel();
+        sendResponse({status: 'ok'});
+      } else if (request.action === 'hidePanel') {
+        const panel = document.getElementById('docs-timers-panel');
+        if (panel) panel.remove();
+        localStorage.setItem('docsTimersPanelClosed', 'true');
+        sendResponse({status: 'ok'});
+      } else if (request.action === 'isPanelOpen') {
+        const panel = document.getElementById('docs-timers-panel');
+        sendResponse({open: !!panel});
       }
       return true;
     });
@@ -67,12 +83,12 @@ class DocsTimerManager {
   setupExtension() {
     console.log('Google Docs Timer: Setting up extension');
     this.createTimersPanel();
-    this.observeDocumentChanges();
     console.log('Google Docs Timer: Extension setup complete');
   }
 
   createTimersPanel() {
     if (document.getElementById('docs-timers-panel')) return;
+    if (localStorage.getItem('docsTimersPanelClosed') === 'true') return;
     const panel = document.createElement('div');
     panel.id = 'docs-timers-panel';
     // Restore position from localStorage if available
@@ -88,31 +104,77 @@ class DocsTimerManager {
       panel.style.right = '32px';
       panel.style.position = 'fixed';
     }
-    panel.style.width = '220px';
-    panel.style.background = 'white';
-    panel.style.border = '1px solid #ddd';
-    panel.style.borderRadius = '8px';
-    panel.style.boxShadow = '0 2px 8px rgba(0,0,0,0.12)';
+    panel.style.width = '300px';
+    panel.style.background = 'rgba(255,255,255,0.96)';
+    panel.style.border = '1px solid #e0e0e0';
+    panel.style.borderRadius = '14px';
+    panel.style.boxShadow = '0 4px 24px rgba(0,0,0,0.10)';
     panel.style.zIndex = '99999';
-    panel.style.padding = '12px 10px 10px 10px';
-    panel.style.fontFamily = 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif';
-    panel.style.fontSize = '13px';
+    panel.style.padding = '7px 6px 6px 6px';
+    panel.style.fontFamily = 'Inter, Segoe UI, Tahoma, Geneva, Verdana, sans-serif';
+    panel.style.fontSize = '14px';
     panel.style.userSelect = 'none';
+    panel.style.maxHeight = '70vh';
+    panel.style.overflowY = 'scroll'; // Always show scrollbar
+    panel.style.scrollbarGutter = 'stable'; // Reserve space for scrollbar
     panel.innerHTML = `
-      <div id="timers-panel-header" style="font-weight:bold; font-size:15px; margin-bottom:8px; display:flex; align-items:center; gap:6px; cursor:move; user-select:none;">
-        ⏱️ Timers
+      <div id="timers-panel-header" style="position:sticky;top:0;z-index:2;background:rgba(255,255,255,0.96);backdrop-filter:blur(2px);font-weight:600; font-size:14px; margin-bottom:4px; display:flex; align-items:center; gap:6px; user-select:none; letter-spacing:0.01em; padding-bottom:2px; border-bottom:1px solid #eee; min-height:28px;">
+        <span style="display:flex;align-items:center;gap:4px;">⏱️ <span style="font-weight:500;">TimeBox</span></span>
+        <span id="timers-total-sum" style="font-weight:bold;font-size:12px;margin-left:auto;text-align:right;flex:1;white-space:nowrap;overflow:hidden;"> </span>
+        <button id="timers-minimize-btn" style="font-size:12px; padding:1px 7px; border-radius:5px; border:none; background:#f3f4f6; color:#444; cursor:pointer; transition:background 0.2s; height:22px; min-width:22px; display:flex;align-items:center;justify-content:center;">${this.minimized ? '▲' : '▼'}</button>
+        <button id="timers-close-btn" style="margin-left:4px; font-size:13px; padding:1px 10px; border-radius:5px; border:none; background:none; color:#888; cursor:pointer; transition:background 0.2s; height:22px; min-width:32px; display:flex;align-items:center;justify-content:center; text-decoration:underline;">Hide</button>
       </div>
       <div id="timers-list"></div>
+      <button id="timers-load-more-btn" style="display:none;margin:6px auto 0 auto;padding:3px 10px;border-radius:5px;background:#e3e7ea;border:none;font-weight:bold;cursor:pointer;font-size:12px;">Load 5 more timers</button>
     `;
     document.body.appendChild(panel);
     this.makePanelDraggable(panel, panel.querySelector('#timers-panel-header'));
     this.updateTimersPanel();
+    // Minimize button logic
+    const minBtn = panel.querySelector('#timers-minimize-btn');
+    minBtn.onclick = () => {
+      this.minimized = !this.minimized;
+      minBtn.textContent = this.minimized ? '▲' : '▼';
+      this.updateTimersPanel();
+    };
+    // Close button logic
+    const closeBtn = panel.querySelector('#timers-close-btn');
+    closeBtn.onclick = () => {
+      panel.remove();
+      localStorage.setItem('docsTimersPanelClosed', 'true');
+    };
+    // Load more button logic
+    const loadMoreBtn = panel.querySelector('#timers-load-more-btn');
+    loadMoreBtn.onclick = () => {
+      const timerStrings = this.findTimerStringsInDoc();
+      const totalTimers = timerStrings.length;
+      const prevCount = this.timersToShowCount;
+      this.timersToShowCount = Math.min(this.timersToShowCount + 5, totalTimers);
+      // Only add new timers to this.timers and this.timerOrder
+      timerStrings.forEach(t => {
+        if (!this.timers[t.id]) {
+          this.timers[t.id] = {
+            timeLeft: t.seconds,
+            totalTime: t.seconds,
+            isRunning: false,
+            completed: false,
+            label: t.label
+          };
+        }
+        if (!this.timerOrder.includes(t.id)) {
+          this.timerOrder.push(t.id);
+        }
+      });
+      this.updateTimersPanel();
+    };
     // Periodically update timers panel for live countdown
     if (!this._timersPanelInterval) {
       this._timersPanelInterval = setInterval(() => {
         this.updateTimersPanel();
       }, 1000);
     }
+    // Initial scan
+    this.scanAndUpdateTimers();
   }
 
   makePanelDraggable(panel, handle) {
@@ -154,34 +216,274 @@ class DocsTimerManager {
     const list = document.getElementById('timers-list');
     if (!list) return;
     list.innerHTML = '';
-    if (this.timers.size === 0) {
-      list.innerHTML = '<div style="color:#888;">No timers</div>';
+    if (this.dropIndicator) {
+      this.dropIndicator.remove();
+      this.dropIndicator = null;
+    }
+    // For the visible timers, always rescan the doc for the latest list
+    const timerStrings = this.findTimerStringsInDoc();
+    // Build a map for fast lookup
+    const timerMap = {};
+    timerStrings.forEach(t => { timerMap[t.id] = t; });
+    // Ensure this.timers is an object for fast lookup
+    if (!this.timers || Array.isArray(this.timers)) this.timers = {};
+    // Only keep timerOrder entries that are present in the current doc scan
+    this.timerOrder = (this.timerOrder || []).filter(id => timerMap[id]);
+    // Add any new timers (not in order) to the end
+    timerStrings.forEach(t => {
+      if (!this.timerOrder.includes(t.id)) this.timerOrder.push(t.id);
+    });
+    // Use timerOrder to determine visible timers
+    let timersArr = this.timerOrder.slice(0, this.timersToShowCount).map(id => {
+      let t = timerMap[id];
+      let state = this.timers[id] || {};
+      if (!this.timers[id]) {
+        this.timers[id] = {
+          timeLeft: t.seconds,
+          totalTime: t.seconds,
+          isRunning: false,
+          completed: false,
+          label: t.label
+        };
+      }
+      return [id, Object.assign({}, t, this.timers[id])];
+    });
+    // Minimize logic: only show running timer and next (or first incomplete) when minimized
+    if (this.minimized) {
+      let runningIdx = timersArr.findIndex(([id, t]) => t.isRunning);
+      let running = runningIdx !== -1 ? timersArr[runningIdx] : null;
+      let nextIdx = -1;
+      if (runningIdx !== -1) {
+        // Next timer after running, not completed
+        nextIdx = timersArr.findIndex(([id, t], i) => i > runningIdx && !t.completed);
+      } else {
+        // No running: show first incomplete
+        nextIdx = timersArr.findIndex(([id, t]) => !t.completed);
+      }
+      let next = nextIdx !== -1 ? timersArr[nextIdx] : null;
+      let minimizedTimers = [];
+      if (running) minimizedTimers.push(running);
+      if (next && (!running || next[0] !== running[0])) minimizedTimers.push(next);
+      if (!running && !next && timersArr.length > 0) {
+        // All completed: show top timer
+        minimizedTimers.push(timersArr[0]);
+      }
+      timersArr = minimizedTimers.filter(Boolean);
+    }
+    // --- Total time at the top: sum of remaining time for visible timers only ---
+    let totalSeconds = 0;
+    timersArr.forEach(([id, t]) => {
+      if (typeof t.timeLeft === 'number') totalSeconds += Math.max(0, t.timeLeft);
+      else if (typeof t.seconds === 'number') totalSeconds += Math.max(0, t.seconds);
+    });
+    const min = Math.floor(totalSeconds / 60);
+    const sec = totalSeconds % 60;
+    const totalStr = `Total: ${min}:${sec.toString().padStart(2, '0')}`;
+    let sumDiv = document.getElementById('timers-total-sum');
+    if (sumDiv) sumDiv.textContent = totalStr;
+    if (timersArr.length === 0) {
+      list.innerHTML = '<div style="color:#bbb; text-align:center; font-size:13px; padding:18px 0;">No timers</div>';
+      const loadMoreBtn = document.getElementById('timers-load-more-btn');
+      if (loadMoreBtn) loadMoreBtn.style.display = 'none';
       return;
     }
-    for (const [timerId, timerData] of this.timers.entries()) {
+    // For drop indicator
+    const createDropIndicator = () => {
+      const ind = document.createElement('div');
+      ind.style.height = '0px';
+      ind.style.borderTop = '3px solid #4caf50';
+      ind.style.margin = '0 0 0 0';
+      ind.style.borderRadius = '2px';
+      ind.style.transition = 'border-color 0.2s';
+      ind.className = 'timer-drop-indicator';
+      return ind;
+    };
+    let dropIndicatorIdx = null;
+    timersArr.forEach(([timerId, timerData], idx) => {
       const timerDiv = document.createElement('div');
       timerDiv.style.display = 'flex';
       timerDiv.style.alignItems = 'center';
       timerDiv.style.justifyContent = 'space-between';
-      timerDiv.style.marginBottom = '8px';
-      timerDiv.style.gap = '6px';
-      timerDiv.style.padding = '4px 0';
-      timerDiv.style.borderBottom = '1px solid #f0f0f0';
+      timerDiv.style.marginBottom = '2px';
+      timerDiv.style.gap = '2px';
+      timerDiv.style.padding = '2px 0 2px 0';
+      timerDiv.style.borderRadius = '6px';
+      timerDiv.style.minHeight = '22px';
+      // Modern color palette
+      if (timerData.completed) {
+        timerDiv.style.background = '#e6f9ed'; // soft green
+      } else if (timerData.isRunning) {
+        timerDiv.style.background = '#ffeaea'; // soft red
+      } else {
+        timerDiv.style.background = '#fff'; // default
+      }
+      timerDiv.style.transition = 'background 0.2s';
+      timerDiv.setAttribute('draggable', 'true');
+      timerDiv.setAttribute('data-timer-id', timerId);
+      // Drag events
+      timerDiv.ondragstart = (e) => {
+        this.draggedTimerId = timerId;
+        e.dataTransfer.effectAllowed = 'move';
+        timerDiv.style.opacity = '0.5';
+      };
+      timerDiv.ondragend = (e) => {
+        this.draggedTimerId = null;
+        timerDiv.style.opacity = '';
+        if (this.dropIndicator) {
+          this.dropIndicator.remove();
+          this.dropIndicator = null;
+        }
+      };
+      timerDiv.ondragover = (e) => {
+        e.preventDefault();
+        // Figure out if mouse is in top or bottom half
+        const rect = timerDiv.getBoundingClientRect();
+        const offset = e.clientY - rect.top;
+        let insertIdx = idx;
+        if (offset > rect.height / 2) insertIdx = idx + 1;
+        // Only update if changed
+        if (dropIndicatorIdx !== insertIdx) {
+          if (this.dropIndicator) this.dropIndicator.remove();
+          this.dropIndicator = createDropIndicator();
+          dropIndicatorIdx = insertIdx;
+          if (insertIdx >= list.children.length) {
+            list.appendChild(this.dropIndicator);
+          } else {
+            list.insertBefore(this.dropIndicator, list.children[insertIdx]);
+          }
+        }
+      };
+      timerDiv.ondragleave = (e) => {
+        timerDiv.style.background = timerData.isRunning ? 'rgba(76,175,80,0.07)' : 'transparent';
+      };
+      timerDiv.ondrop = (e) => {
+        e.preventDefault();
+        timerDiv.style.background = timerData.isRunning ? 'rgba(76,175,80,0.07)' : 'transparent';
+        if (this.dropIndicator) {
+          this.dropIndicator.remove();
+          this.dropIndicator = null;
+        }
+        if (this.draggedTimerId && this.draggedTimerId !== timerId) {
+          // Fix: If dragging down, adjust toIdx if fromIdx < toIdx
+          const fromIdx = this.timerOrder.indexOf(this.draggedTimerId);
+          let toIdx = dropIndicatorIdx !== null ? dropIndicatorIdx : this.timerOrder.indexOf(timerId);
+          if (fromIdx !== -1 && toIdx !== -1) {
+            if (fromIdx < toIdx) toIdx--;
+            this.timerOrder.splice(toIdx, 0, this.timerOrder.splice(fromIdx, 1)[0]);
+            localStorage.setItem('docsTimerOrder', JSON.stringify(this.timerOrder));
+            this.updateTimersPanel();
+          }
+        }
+      };
+      // Render timer row compactly
       timerDiv.innerHTML = `
-        <span style="font-variant-numeric: tabular-nums; min-width:60px; display:inline-block;">${this.formatTime(timerData.timeLeft)}</span>
-        <span style="color:#ff9800; font-size:12px; margin-right:6px;">${timerData.label ? timerData.label : ''}</span>
-        <span>
-          <button style="font-size:13px; margin-right:2px;" title="Start/Pause">${timerData.isRunning ? '⏸️' : '▶️'}</button>
-          <button style="font-size:13px; margin-right:2px;" title="Reset">🔄</button>
-          <button style="font-size:13px;" title="Delete">❌</button>
+        <span style="font-variant-numeric: tabular-nums; min-width:32px; display:inline-block; font-size:12px; font-weight:500; color:#222;">${this.formatTime(timerData.timeLeft)}</span>
+        <span style="color:#1976d2; font-size:12px; margin:0 3px; flex:1 1 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:500; letter-spacing:0.01em;">${timerData.label ? timerData.label : ''}</span>
+        <span style="display:flex; align-items:center; gap:1px; flex-shrink:0; white-space:nowrap;">
+          ${timerData.timeLeft === 0 ? '<button class="timer-btn timer-checkbox" title="Completed" style="font-size:13px; padding:1px 2px; cursor:default; color:#21c521 !important; background:none; border:none; outline:none; box-shadow:none; pointer-events:none;">☑️</button>' : `<button class="timer-btn timer-play" title="Start/Pause" style="font-size:12px; padding:1px 2px; background:none; border:none; color:#444;">${timerData.isRunning ? '⏸️' : '▶️'}</button>`}
+          <button class="timer-btn timer-reset" title="Reset" style="font-size:11px; padding:1px 3px; background:none; border:none; color:#888;">🔄</button>
+          <button class="timer-btn timer-settings" title="Settings" style="font-size:11px; padding:1px 3px; background:none; border:none; color:#888;">⚙️</button>
+          <button class="timer-btn timer-skip" title="Skip/Complete" style="font-size:13px; padding:1px 3px; background:none; border:none; color:#1976d2;">⏭️</button>
+          <button class="timer-btn timer-delete" title="Delete" style="font-size:11px; padding:1px 3px; background:none; border:none; color:#e74c3c;">✕</button>
         </span>
       `;
       // Button actions
-      const [playBtn, resetBtn, deleteBtn] = timerDiv.querySelectorAll('button');
-      playBtn.onclick = () => this.toggleTimer(timerId);
-      resetBtn.onclick = () => this.resetTimer(timerId);
+      const btns = timerDiv.querySelectorAll('button');
+      const playBtn = btns[0];
+      const resetBtn = btns[1];
+      const settingsBtn = btns[2];
+      const skipBtn = btns[3];
+      const deleteBtn = btns[4];
+      if (timerData.timeLeft === 0) {
+        playBtn.disabled = true;
+        playBtn.style.cursor = 'default';
+      } else {
+        playBtn.onclick = () => {
+          this.toggleTimer(timerId);
+          this.updateTimersPanel();
+        };
+      }
+      resetBtn.onclick = () => {
+        this.resetTimer(timerId);
+        this.updateTimersPanel();
+      };
+      settingsBtn.onclick = () => this.showTimerSettings(timerId);
+      skipBtn.onclick = () => {
+        this.timers[timerId].completed = true;
+        this.timers[timerId].isRunning = false;
+        this.timers[timerId].timeLeft = 0;
+        this.updateTimersPanel();
+      };
       deleteBtn.onclick = () => this.deleteTimer(timerId);
+      // Complete button
+      const completeBtn = document.createElement('button');
+      completeBtn.textContent = '☑️';
+      completeBtn.title = 'Mark as complete';
+      completeBtn.style.background = 'none';
+      completeBtn.style.border = 'none';
+      completeBtn.style.cursor = 'pointer';
+      completeBtn.style.fontSize = '18px';
+      completeBtn.style.color = '#4caf50';
+      completeBtn.style.opacity = timerData.completed ? '1' : '0.7';
+      completeBtn.disabled = timerData.completed;
+      completeBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (!this.timers[timerId].completed) {
+          this.timers[timerId].completed = true;
+          this.timers[timerId].isRunning = false;
+          this.updateTimersPanel();
+        }
+      };
+      // Insert completeBtn in the row (e.g., after label)
+      const labelSpan = timerDiv.querySelector('span.timer-label');
+      if (labelSpan) {
+        const span = document.createElement('span');
+        span.style.marginRight = '6px';
+        span.appendChild(completeBtn);
+        labelSpan.parentNode.insertBefore(span, labelSpan.nextSibling);
+      }
       list.appendChild(timerDiv);
+    });
+    // If dragging to empty space at bottom, allow drop there
+    list.ondragover = (e) => {
+      if (!this.draggedTimerId) return;
+      e.preventDefault();
+      if (list.children.length === 0 || (this.dropIndicator && this.dropIndicator.parentNode !== list)) {
+        if (this.dropIndicator) this.dropIndicator.remove();
+        this.dropIndicator = createDropIndicator();
+        list.appendChild(this.dropIndicator);
+        dropIndicatorIdx = list.children.length;
+      }
+    };
+    list.ondrop = (e) => {
+      if (this.dropIndicator) {
+        this.dropIndicator.remove();
+        this.dropIndicator = null;
+      }
+    };
+    // Update minimize/maximize button icon
+    const minBtn = document.getElementById('timers-minimize-btn');
+    if (minBtn) {
+      minBtn.textContent = this.minimized ? '▲' : '▼';
+    }
+    // Sticky header solid background
+    const header = document.getElementById('timers-header');
+    if (header) {
+      header.style.background = '#fff';
+      header.style.opacity = '1';
+      header.style.backdropFilter = 'none';
+      header.style.zIndex = '10';
+    }
+    // Show/hide load more button
+    const loadMoreBtn = document.getElementById('timers-load-more-btn');
+    if (loadMoreBtn) {
+      if (this.minimized) {
+        loadMoreBtn.style.display = 'none';
+      } else if (timerStrings.length > this.timersToShowCount) {
+        loadMoreBtn.style.display = 'block';
+      } else {
+        loadMoreBtn.style.display = 'none';
+      }
     }
   }
 
@@ -226,106 +528,53 @@ class DocsTimerManager {
     }, 1000);
   }
 
-  addTimerAtCursor() {
-    console.log('AddTimerAtCursor called!');
-    
-    const selection = window.getSelection();
-    if (selection.rangeCount === 0) {
-      console.log('No selection range found, trying alternative method');
-      this.addTimerAlternative();
-      return;
-    }
-
-    const range = selection.getRangeAt(0);
-    const timerId = `timer-${++this.timerCounter}`;
-    
-    console.log(`Creating timer with ID: ${timerId}`);
-    
-    // Create timer element
-    const timerElement = this.createTimerElement(timerId);
-    
-    // Insert at cursor position
-    try {
-      range.deleteContents();
-      range.insertNode(timerElement);
-      
-      // Move cursor after the timer
-      range.setStartAfter(timerElement);
-      range.setEndAfter(timerElement);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      
-      console.log('Timer inserted successfully');
-    } catch (error) {
-      console.error('Failed to insert timer:', error);
-      // Fallback: append to document
-      this.insertTimerAlternative(timerElement);
-    }
-    this.updateTimersPanel();
-  }
-
-  addTimerAlternative() {
-    console.log('Using alternative timer insertion method');
-    const timerId = `timer-${++this.timerCounter}`;
-    const timerElement = this.createTimerElement(timerId);
-    
-    // Try to find the document body or editor area
-    const editorArea = document.querySelector('.kix-canvas-tile-content') ||
-                      document.querySelector('[role="textbox"]') ||
-                      document.querySelector('.docs-texteventtarget-iframe') ||
-                      document.querySelector('#docs-editor') ||
-                      document.querySelector('.kix-appview-editor') ||
-                      document.body;
-    
-    if (editorArea) {
-      // Create a wrapper paragraph
-      const wrapper = document.createElement('p');
-      wrapper.appendChild(timerElement);
-      editorArea.appendChild(wrapper);
-      console.log('Timer added using alternative method');
-    } else {
-      console.error('Could not find suitable container for timer');
-    }
-    this.updateTimersPanel();
-  }
-
-  createTimerElement(timerId, initialMinutes = 5) {
+  createTimerElement(timerId, initialMinutes = 5, label = '', totalSeconds = null) {
     const container = document.createElement('span');
     container.className = 'docs-timer-container';
     container.contentEditable = false;
-    container.style.display = 'inline-block';
-    container.style.margin = '0 4px';
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+    container.style.margin = '0 2px';
+    container.style.width = '100%';
+    container.style.minHeight = '28px';
+    container.style.padding = '0';
     
     const timer = document.createElement('span');
     timer.className = 'docs-timer';
     timer.id = timerId;
+    timer.style.display = 'flex';
+    timer.style.alignItems = 'center';
+    timer.style.flex = '1 1 0';
+    timer.style.gap = '4px';
+    timer.style.width = '100%';
     timer.innerHTML = `
-      <span class="timer-display">${this.formatTime(initialMinutes * 60)}</span>
-      <span class="timer-controls">
-        <button class="timer-btn timer-play" title="Start/Pause">▶️</button>
-        <button class="timer-btn timer-reset" title="Reset">🔄</button>
-        <button class="timer-btn timer-settings" title="Settings">⚙️</button>
-        <button class="timer-btn timer-delete" title="Delete">❌</button>
+      <span class="timer-display" style="min-width:38px; text-align:right; font-size:13px;">${this.formatTime(totalSeconds !== null ? totalSeconds : initialMinutes * 60)}</span>
+      <span class="timer-label" style="color:#ff9800; font-size:12px; margin:0 4px; flex:1 1 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${label ? label : ''}</span>
+      <span class="timer-controls" style="display:flex; align-items:center; gap:2px; flex-shrink:0; white-space:nowrap;">
+        <button class="timer-btn timer-play" title="Start/Pause" style="font-size:13px; padding:2px 4px;">▶️</button>
+        <button class="timer-btn timer-reset" title="Reset" style="font-size:13px; padding:2px 4px;">🔄</button>
+        <button class="timer-btn timer-settings" title="Settings" style="font-size:13px; padding:2px 4px;">⚙️</button>
+        <button class="timer-btn timer-delete" title="Delete" style="font-size:13px; padding:2px 4px;">❌</button>
       </span>
     `;
 
     // Initialize timer data
     this.timers.set(timerId, {
       element: timer,
-      timeLeft: initialMinutes * 60,
-      totalTime: initialMinutes * 60,
+      timeLeft: totalSeconds !== null ? totalSeconds : initialMinutes * 60,
+      totalTime: totalSeconds !== null ? totalSeconds : initialMinutes * 60,
       isRunning: false,
-      interval: null
+      interval: null,
+      label: label
     });
 
     this.setupTimerControls(timer, timerId);
     container.appendChild(timer);
-    
     return container;
   }
 
   setupTimerControls(timer, timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     
     // Play/Pause button
     const playBtn = timer.querySelector('.timer-play');
@@ -366,7 +615,7 @@ class DocsTimerManager {
   }
 
   toggleTimer(timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     if (!timerData) return;
 
     if (timerData.isRunning) {
@@ -378,126 +627,110 @@ class DocsTimerManager {
   }
 
   startTimer(timerId) {
-    const timerData = this.timers.get(timerId);
+    // Pause all other timers
+    for (const [id, timerData] of Object.entries(this.timers)) {
+      if (id !== timerId && timerData.isRunning) {
+        this.pauseTimer(id);
+      }
+    }
+    const timerData = this.timers[timerId];
     if (!timerData) return;
-
     timerData.isRunning = true;
-    const playBtn = timerData.element.querySelector('.timer-play');
-    playBtn.innerHTML = '⏸️';
-    playBtn.title = 'Pause';
-
-    timerData.element.classList.add('timer-running');
-
+    // Remove direct DOM updates (playBtn, classList, etc.)
+    if (timerData.interval) clearInterval(timerData.interval);
     timerData.interval = setInterval(() => {
       timerData.timeLeft--;
-      this.updateTimerDisplay(timerId);
-
       if (timerData.timeLeft <= 0) {
         this.timerFinished(timerId);
       }
+      this.updateTimersPanel();
     }, 1000);
     this.updateTimersPanel();
   }
 
   pauseTimer(timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     if (!timerData) return;
-
     timerData.isRunning = false;
     clearInterval(timerData.interval);
-    
-    const playBtn = timerData.element.querySelector('.timer-play');
-    playBtn.innerHTML = '▶️';
-    playBtn.title = 'Start';
-
-    timerData.element.classList.remove('timer-running');
+    timerData.interval = null;
+    // Remove direct DOM updates (playBtn, classList, etc.)
     this.updateTimersPanel();
   }
 
   resetTimer(timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     if (!timerData) return;
-
     this.pauseTimer(timerId);
     timerData.timeLeft = timerData.totalTime;
-    timerData.element.classList.remove('timer-finished');
-    this.updateTimerDisplay(timerId);
+    timerData.completed = false;
+    // Remove direct DOM updates (classList, etc.)
     this.updateTimersPanel();
   }
 
   updateTimerDisplay(timerId) {
-    const timerData = this.timers.get(timerId);
-    if (!timerData) return;
-
-    const display = timerData.element.querySelector('.timer-display');
-    display.textContent = this.formatTime(timerData.timeLeft);
-
-    // Change color based on time remaining
-    const percentage = timerData.timeLeft / timerData.totalTime;
-    if (percentage <= 0.1) {
-      timerData.element.classList.add('timer-critical');
-    } else if (percentage <= 0.25) {
-      timerData.element.classList.add('timer-warning');
-    } else {
-      timerData.element.classList.remove('timer-critical', 'timer-warning');
-    }
+    // No-op: all DOM updates handled in updateTimersPanel
   }
 
   timerFinished(timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     if (!timerData) return;
-
     this.pauseTimer(timerId);
-    timerData.element.classList.add('timer-finished');
-    
-    // Show notification
-    this.showNotification('Timer finished!', `Timer "${timerId}" has reached zero.`);
-    
-    // Flash the timer
-    this.flashTimer(timerId);
+    timerData.isRunning = false;
+    timerData.timeLeft = 0;
+    timerData.completed = true;
+    this.updateTimersPanel();
+    // Use blocking alert for completion
+    alert(`Timer for "${timerData.label}" has finished!`);
   }
 
   flashTimer(timerId) {
-    const timerData = this.timers.get(timerId);
-    if (!timerData) return;
-
-    let flashCount = 0;
-    const flashInterval = setInterval(() => {
-      timerData.element.style.opacity = timerData.element.style.opacity === '0.3' ? '1' : '0.3';
-      flashCount++;
-      
-      if (flashCount >= 6) {
-        clearInterval(flashInterval);
-        timerData.element.style.opacity = '1';
-      }
-    }, 300);
+    // No-op: all DOM updates handled in updateTimersPanel
   }
 
   showTimerSettings(timerId) {
-    const timerData = this.timers.get(timerId);
+    const timerData = this.timers[timerId];
     if (!timerData) return;
-
-    const currentMinutes = Math.ceil(timerData.totalTime / 60);
-    const newMinutes = prompt(`Set timer duration (minutes):`, currentMinutes);
-    
-    if (newMinutes && !isNaN(newMinutes) && newMinutes > 0) {
-      const newTime = parseInt(newMinutes) * 60;
+    const currentMinutes = Math.floor(timerData.totalTime / 60);
+    const currentSeconds = timerData.totalTime % 60;
+    let promptVal = currentMinutes > 0 && currentSeconds === 0 ? currentMinutes : `${currentMinutes}:${currentSeconds.toString().padStart(2, '0')}`;
+    const newVal = prompt(`Set timer duration (minutes, mm:ss, :ss, or 3s/3sec):`, promptVal);
+    if (!newVal) return;
+    let newTime = 0;
+    const trimmed = newVal.trim();
+    if (/^:\d{1,2}$/.test(trimmed)) {
+      // :ss format
+      newTime = parseInt(trimmed.slice(1), 10);
+    } else if (/^(\d+)s(ec)?$/.test(trimmed)) {
+      // 3s or 3sec
+      newTime = parseInt(trimmed, 10);
+    } else if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
+      // mm:ss format
+      const [min, sec] = trimmed.split(':').map(Number);
+      newTime = min * 60 + sec;
+    } else if (/^\d+$/.test(trimmed)) {
+      // Just a number, treat as minutes
+      newTime = parseInt(trimmed) * 60;
+    } else {
+      alert('Invalid format. Use minutes (e.g. 2), mm:ss (e.g. 0:30), :ss (e.g. :05), or 3s/3sec.');
+      return;
+    }
+    if (newTime > 0) {
       timerData.totalTime = newTime;
       timerData.timeLeft = newTime;
-      timerData.element.classList.remove('timer-finished', 'timer-critical', 'timer-warning');
-      this.updateTimerDisplay(timerId);
+      timerData.completed = false;
+      this.updateTimersPanel();
     }
   }
 
   deleteTimer(timerId) {
-    const timerData = this.timers.get(timerId);
-    if (!timerData) return;
-
-    if (confirm('Delete this timer?')) {
-      this.pauseTimer(timerId);
-      timerData.element.parentElement.remove();
-      this.timers.delete(timerId);
-    }
+    if (!this.timers[timerId]) return;
+    this.pauseTimer(timerId);
+    delete this.timers[timerId];
+    // Remove from timerOrder
+    this.timerOrder = this.timerOrder.filter(id => id !== timerId);
+    // Decrease visible count if needed
+    this.timersToShowCount = Math.max(0, this.timersToShowCount - 1);
     this.updateTimersPanel();
   }
 
@@ -550,188 +783,108 @@ class DocsTimerManager {
     });
   }
 
-  insertTimerAlternative(timerElement) {
-    // Alternative method to insert timer when direct cursor insertion fails
-    const selection = window.getSelection();
-    if (selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const textNode = document.createTextNode(' ');
-      range.insertNode(textNode);
-      range.insertNode(timerElement);
-    }
+  // Helper to get timers in user order
+  getOrderedTimers() {
+    const all = Array.from(this.timers.entries());
+    // If no order, return as is
+    if (!this.timerOrder.length) return all;
+    // Sort by order, then append any new timers
+    const orderMap = new Map(this.timerOrder.map((id, idx) => [id, idx]));
+    all.sort((a, b) => {
+      const ai = orderMap.has(a[0]) ? orderMap.get(a[0]) : 9999;
+      const bi = orderMap.has(b[0]) ? orderMap.get(b[0]) : 9999;
+      return ai - bi;
+    });
+    return all;
   }
 
-  observeDocumentChanges() {
-    // Observe document changes to maintain timer functionality
-    const observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
-        // Re-initialize any timers that may have been affected
-        mutation.removedNodes.forEach((node) => {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const timers = node.querySelectorAll('.docs-timer');
-            timers.forEach((timer) => {
-              if (this.timers.has(timer.id)) {
-                this.timers.delete(timer.id);
-              }
-            });
-          }
-        });
-      });
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-
-    this.observeTimeStrings();
-  }
-
-  observeTimeStrings() {
-    // Observe the main editor for text changes
-    const editorArea = document.querySelector('.kix-appview-editor');
-    if (!editorArea) return;
-    const observer = new MutationObserver(() => {
-      this.showTimeStringOverlays(editorArea);
-    });
-    observer.observe(editorArea, { childList: true, subtree: true, characterData: true });
-    this.showTimeStringOverlays(editorArea);
-    // Periodically rescan for overlays (handles Google Docs virtual DOM)
-    if (!this._timeStringInterval) {
-      this._timeStringInterval = setInterval(() => {
-        this.showTimeStringOverlays(editorArea);
-      }, 1500);
-    }
-  }
-
-  showTimeStringOverlays(root) {
-    // Debug: scan counter
-    if (!window.docsTimerDebugCounter) {
-      const counter = document.createElement('div');
-      counter.id = 'docs-timer-debug-counter';
-      counter.style.position = 'fixed';
-      counter.style.top = '0';
-      counter.style.left = '0';
-      counter.style.background = '#222';
-      counter.style.color = '#fff';
-      counter.style.zIndex = '100001';
-      counter.style.fontSize = '14px';
-      counter.style.padding = '2px 8px';
-      counter.textContent = 'Scans: 0';
-      document.body.appendChild(counter);
-      window.docsTimerDebugCounter = counter;
-      window.docsTimerDebugCount = 0;
-    }
-    window.docsTimerDebugCount++;
-    window.docsTimerDebugCounter.textContent = 'Scans: ' + window.docsTimerDebugCount;
-
-    // Remove old overlays
-    document.querySelectorAll('.docs-timer-overlay-btn').forEach(btn => btn.remove());
-    // Remove old highlights
-    document.querySelectorAll('.docs-timer-debug-highlight').forEach(el => el.classList.remove('docs-timer-debug-highlight'));
-    // Regex for time strings: 3m, 5m, 2:00, 10min, etc.
-    const timeRegex = /\b(\d{1,2}m(in)?|\d{1,2}:\d{2})\b/gi;
-    // Scan for SVG <rect> elements with aria-label
-    const rects = document.querySelectorAll('svg rect[aria-label]');
-    rects.forEach(rect => {
-      const label = rect.getAttribute('aria-label');
-      if (!label) return;
-      let match;
-      while ((match = timeRegex.exec(label)) !== null) {
-        if (!match || !match[0]) continue;
-        // Get the parent SVG's bounding rect
-        const svg = rect.ownerSVGElement;
-        if (!svg) return;
-        const svgRect = svg.getBoundingClientRect();
-        // Calculate overlay position using rect's x/y/width/height and SVG's position
-        let x = parseFloat(rect.getAttribute('x') || '0');
-        let y = parseFloat(rect.getAttribute('y') || '0');
-        let width = parseFloat(rect.getAttribute('width') || '0');
-        let height = parseFloat(rect.getAttribute('height') || '0');
-        // Refined: center vertically with the rect, offset right
-        let left = svgRect.left + x + width + 8;
-        let top = svgRect.top + y + height / 2 - 14; // 14px = half overlay height
-        // Fallback: if left is off-screen, move to mouse on hover
-        const btn = document.createElement('div');
-        btn.className = 'docs-timer-overlay-btn';
-        btn.textContent = '+⏱️';
-        btn.title = 'Add timer for ' + match[0];
-        btn.dataset.timerMatch = match[0];
-        btn.style.position = 'fixed';
-        btn.style.left = left + 'px';
-        btn.style.top = top + 'px';
-        btn.style.background = '#fffbe7';
-        btn.style.border = '1px solid #ffe082';
-        btn.style.borderRadius = '4px';
-        btn.style.padding = '1px 6px';
-        btn.style.fontSize = '13px';
-        btn.style.boxShadow = '0 1px 4px rgba(0,0,0,0.08)';
-        btn.style.cursor = 'pointer';
-        btn.style.zIndex = '100000';
-        btn.style.userSelect = 'none';
-        btn.style.transition = 'background 0.2s';
-        btn.setAttribute('title', 'Click to add timer to panel');
-        btn.onmouseenter = (e) => {
-          btn.style.background = '#ffe082';
-          if (left < 50) {
-            btn.style.left = (e.clientX + 16) + 'px';
-            btn.style.top = (e.clientY - 14) + 'px';
-          }
-        };
-        btn.onmouseleave = () => btn.style.background = '#fffbe7';
-        btn.onclick = (e) => {
-          e.stopPropagation();
-          const matchValue = btn.dataset.timerMatch;
-          if (!matchValue) return;
-          let minutes = 0;
-          if (/^\d{1,2}m(in)?$/i.test(matchValue)) {
-            minutes = parseInt(matchValue);
-          } else if (/^\d{1,2}:\d{2}$/.test(matchValue)) {
-            const [min, sec] = matchValue.split(':').map(Number);
-            minutes = min + (sec >= 30 ? 1 : 0);
-          }
-          if (minutes > 0) {
-            this.addTimerToPanel(minutes, matchValue);
-            this.showConfirmation(left, top, matchValue);
-          }
-          btn.remove();
-        };
-        document.body.appendChild(btn);
-      }
-    });
-  }
-
-  addTimerToPanel(minutes, label) {
-    const timerId = `timer-${++this.timerCounter}`;
-    const timerElement = this.createTimerElement(timerId, minutes);
-    // Optionally, you could add the label to the timer UI
-    this.timers.set(timerId, {
-      element: timerElement,
-      timeLeft: minutes * 60,
-      totalTime: minutes * 60,
-      isRunning: false,
-      interval: null,
-      label: label
-    });
+  // When adding a new timer, add its ID to timerOrder if not present
+  scanAndUpdateTimers() {
+    // Always reset to 5 timers on page load/refresh
+    this.timersToShowCount = 5;
+    // Reset timerOrder to doc order
+    const timerStrings = this.findTimerStringsInDoc();
+    this.timerOrder = timerStrings.map(t => t.id);
     this.updateTimersPanel();
-    this.startTimer(timerId);
   }
 
-  showConfirmation(left, top, label) {
-    const conf = document.createElement('div');
-    conf.textContent = `Timer for ${label} added!`;
-    conf.style.position = 'fixed';
-    conf.style.left = left + 40 + 'px';
-    conf.style.top = top + 'px';
-    conf.style.background = '#4caf50';
-    conf.style.color = '#fff';
-    conf.style.padding = '4px 12px';
-    conf.style.borderRadius = '4px';
-    conf.style.fontSize = '13px';
-    conf.style.zIndex = '100001';
-    conf.style.boxShadow = '0 2px 8px rgba(0,0,0,0.12)';
-    document.body.appendChild(conf);
-    setTimeout(() => conf.remove(), 1200);
+  scanForTimers() {
+    // On full page load, only show the top 5 timers
+    const timerStrings = this.findTimerStringsInDoc();
+    this.allTimers = timerStrings; // Store all found timers
+    this.timers = new Map();
+    for (let i = 0; i < Math.min(this.timersToShowCount, timerStrings.length); ++i) {
+      const t = timerStrings[i];
+      this.timers.set(t.id, {
+        ...t,
+        completed: false,
+        isRunning: false,
+      });
+    }
+    this.timerOrder = Array.from(this.timers.keys());
+    this.saveTimers();
+    this.updateTimersPanel();
+  }
+
+  findTimerStringsInDoc() {
+    // Scan the doc for timer strings and return an array of timer objects
+    const rects = document.querySelectorAll('svg rect[aria-label]');
+    const timeRegex = /\b(\d{1,2}m(in)?|\d{1,2}:\d{2}|\d{1,2}min|\d{1,2}s(ec|econds)?)\b/gi;
+    const timers = [];
+    const seen = new Set();
+    let idx = 0;
+    for (let rect of rects) {
+      const label = rect.getAttribute('aria-label');
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      timeRegex.lastIndex = 0;
+      const match = timeRegex.exec(label);
+      if (match) {
+        // Try to find the first line of the bullet point if this is a multi-line bullet
+        let bulletText = null;
+        let node = rect;
+        while (node && !bulletText) {
+          // Look for a parent with aria-label (the bullet's first line)
+          if (node !== rect && node.getAttribute && node.getAttribute('aria-label')) {
+            bulletText = node.getAttribute('aria-label');
+          }
+          node = node.parentNode;
+        }
+        let labelSource = bulletText || label;
+        // Extract the text before the timer string for the label
+        let before = labelSource.slice(0, match.index).replace(/\s+/g, ' ').trim();
+        let timerLabel = before.split(' ').slice(0, 5).join(' ');
+        if (!timerLabel) timerLabel = labelSource.replace(match[0], '').replace(/\s+/g, ' ').trim().split(' ').slice(0, 5).join(' ');
+        if (!timerLabel) timerLabel = 'Timer';
+        let minutes = 0;
+        let seconds = 0;
+        if (/^\d{1,2}m(in)?$/i.test(match[0])) {
+          minutes = parseInt(match[0]);
+        } else if (/^\d{1,2}:\d{2}$/.test(match[0])) {
+          const [min, sec] = match[0].split(':').map(Number);
+          minutes = min;
+          seconds = sec;
+        } else if (/^\d{1,2}min$/i.test(match[0])) {
+          minutes = parseInt(match[0]);
+        } else if (/^\d{1,2}s(ec|econds)?$/i.test(match[0])) {
+          seconds = parseInt(match[0]);
+        }
+        let totalSeconds = minutes * 60 + seconds;
+        if (totalSeconds > 0) {
+          timers.push({
+            id: `timer-doc-${idx++}`,
+            label: timerLabel,
+            time: match[0],
+            seconds: totalSeconds,
+            timeLeft: totalSeconds,
+            totalTime: totalSeconds,
+            completed: false,
+            isRunning: false
+          });
+        }
+      }
+    }
+    return timers;
   }
 }
 

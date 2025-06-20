@@ -74,11 +74,58 @@ function initializePopup() {
       });
     }
   });
+
+  document.getElementById('show-panel-btn').onclick = function() {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      chrome.tabs.sendMessage(tabs[0].id, { action: 'showPanel' });
+    });
+  };
+}
+
+function updateButtonState() {
+  chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'isPanelOpen' }, function(response) {
+      const btn = document.getElementById('toggle-panel-btn');
+      if (response && response.open) {
+        btn.textContent = 'Hide Timer Panel';
+        btn.onclick = function() {
+          chrome.tabs.sendMessage(tabs[0].id, { action: 'hidePanel' });
+          setTimeout(updateButtonState, 200);
+        };
+      } else {
+        btn.textContent = 'Show Timer Panel';
+        btn.onclick = function() {
+          chrome.tabs.sendMessage(tabs[0].id, { action: 'showPanel' });
+          setTimeout(updateButtonState, 200);
+        };
+      }
+    });
+  });
 }
 
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initializePopup);
+  document.addEventListener('DOMContentLoaded', updateButtonState);
 } else {
   initializePopup();
+  updateButtonState();
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+  const toggle = document.getElementById('show-timers-toggle');
+  chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'isPanelOpen' }, function(response) {
+      toggle.checked = !!(response && response.open);
+    });
+  });
+  toggle.onchange = function() {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      if (toggle.checked) {
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'showPanel' });
+      } else {
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'hidePanel' });
+      }
+    });
+  };
+});

@@ -16,4 +16,14 @@ chrome.commands.onCommand.addListener((command) => {
       }
     });
   }
+});
+
+chrome.action.onClicked.addListener((tab) => {
+  chrome.tabs.sendMessage(tab.id, { action: 'showPanel' }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('Error sending message:', chrome.runtime.lastError.message);
+    } else {
+      console.log('Show panel message sent successfully, response:', response);
+    }
+  });
 }); 
