@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Google Docs Timer ⏱️",
+  "version": "0.9",
+  "description": "Add clickable timers to Google Docs for time-boxed discussions",
+  "permissions": [
+    "activeTab"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://docs.google.com/document/*",
+        "https://docs.google.com/spreadsheets/*",
+        "https://docs.google.com/*/d/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "add_timer": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "mac": "Command+Shift+U"
+      },
+      "description": "Add a timer to the document (customize shortcut in chrome://extensions/shortcuts)"
+    }
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Google Docs Timer ⏱️"
+  }
+}
